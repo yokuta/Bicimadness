@@ -1,9 +1,9 @@
 # 馃毑 Bicimadness
-Aplicación web para el análisis de datos de BiciMAD basada en una arquitectura distribuida con frontend en React, backend en FastAPI y una base de datos DuckDB almacenada de forma privada. El proyecto está desplegado utilizando únicamente servicios gratuitos y con control de acceso al frontend.
+Aplicaci贸n web para el an谩lisis de datos de BiciMAD basada en una arquitectura distribuida con frontend en React, backend en FastAPI y una base de datos DuckDB almacenada de forma privada. El proyecto est谩 desplegado utilizando 煤nicamente servicios gratuitos y con control de acceso al frontend.
 ---
 ## 脥ndice
 
-1. Descripción general  
+1. Descripci贸n general  
 2. URLs del proyecto  
 3. Arquitectura  
 4. Frontend  
@@ -14,9 +14,9 @@ Aplicación web para el análisis de datos de BiciMAD basada en una arquitectura
 
 ---
 
-## **1. Descripción general**
+## **1. Descripci贸n general**
 
-Bicimadness es una aplicación web que permite consultar y analizar datos históricos del sistema BiciMAD. El frontend ofrece visualizaciones e interacción con el usuario, mientras que el backend expone una API REST que consulta una base de datos DuckDB de gran tama?o (~300 MB).
+Bicimadness es una aplicaci贸n web que permite consultar y analizar datos hist贸ricos del sistema BiciMAD. El frontend ofrece visualizaciones e interacci贸n con el usuario, mientras que el backend expone una API REST que consulta una base de datos DuckDB de gran tama帽o (~300 MB).
 
 Los datos no se incluyen en el repositorio y se gestionan de forma privada mediante almacenamiento externo.
 
@@ -24,7 +24,7 @@ Los datos no se incluyen en el repositorio y se gestionan de forma privada media
 
 ## **2. URLs del proyecto**
 
-Frontend (protegido con autenticación):
+Frontend (protegido con autenticaci贸n):
 https://tgisbicimad.jjimenezfernan.workers.dev/
 
 Backend / API:
@@ -37,9 +37,9 @@ https://bicimadness.onrender.com/
 La arquitectura del proyecto es la siguiente:
 
 - El usuario accede al frontend desplegado en Cloudflare Workers.
-- Cloudflare Access controla qui茅n puede acceder a la aplicación.
+- Cloudflare Access controla qui茅n puede acceder a la aplicaci贸n.
 - El frontend realiza peticiones HTTPS a la API.
-- La API está desplegada en Render usando FastAPI.
+- La API est谩 desplegada en Render usando FastAPI.
 - El backend descarga el archivo DuckDB desde Cloudflare R2 al arrancar.
 - DuckDB se abre en modo de solo lectura para realizar consultas.
 
@@ -47,12 +47,12 @@ La arquitectura del proyecto es la siguiente:
 
 ## **4. Frontend**
 
-- Tecnología: React
+- Tecnolog铆a: React
 - Hosting: Cloudflare Workers (workers.dev)
 - Acceso: restringido mediante Cloudflare Access
-- M茅todo de autenticación: One-time PIN por email
-- El código del frontend no contiene datos sensibles
-- No es necesario modificar el frontend para la autenticación
+- M茅todo de autenticaci贸n: One-time PIN por email
+- El c贸digo del frontend no contiene datos sensibles
+- No es necesario modificar el frontend para la autenticaci贸n
 
 ---
 
@@ -62,10 +62,10 @@ La arquitectura del proyecto es la siguiente:
 - Hosting: Render (plan gratuito)
 - Tipo: API REST
 - Funcionalidades principales:
-  - Consultas por estación y fecha
+  - Consultas por estaci贸n y fecha
   - Series temporales
-  - Resúmenes mensuales y anuales
-  - Exportación de datos en formato Excel (XLSX)
+  - Res煤menes mensuales y anuales
+  - Exportaci贸n de datos en formato Excel (XLSX)
 
 El backend se inicia descargando la base de datos desde Cloudflare R2 y despu茅s levanta el servidor FastAPI.
 
@@ -74,7 +74,7 @@ El backend se inicia descargando la base de datos desde Cloudflare R2 y despu茅s
 ## **6. Base de datos**
 
 - Motor: DuckDB
-- Tama?o aproximado: 300 MB
+- Tama帽o aproximado: 300 MB
 - Modo de uso: solo lectura
 - El archivo no se encuentra en el repositorio
 - El backend abre la base de datos localmente tras descargarla
@@ -97,13 +97,13 @@ El backend se inicia descargando la base de datos desde Cloudflare R2 y despu茅s
 ### Frontend
 
 - Protegido con Cloudflare Access
-- Solo los emails permitidos en la política pueden acceder
-- Autenticación mediante código enviado por email
+- Solo los emails permitidos en la pol铆tica pueden acceder
+- Autenticaci贸n mediante c贸digo enviado por email
 
 ### Backend
 
-- La API es públicamente accesible a nivel de red
-- El acceso efectivo está controlado por el frontend protegido
+- La API es p煤blicamente accesible a nivel de red
+- El acceso efectivo est谩 controlado por el frontend protegido
 - La base de datos es de solo lectura
 - No existen endpoints de escritura destructiva
 
@@ -111,7 +111,7 @@ El backend se inicia descargando la base de datos desde Cloudflare R2 y despu茅s
 
 ## **9. Costes**
 
-El proyecto utiliza únicamente planes gratuitos:
+El proyecto utiliza 煤nicamente planes gratuitos:
 
 - Cloudflare Workers: gratuito
 - Cloudflare Access: gratuito
