@@ -1,6 +1,6 @@
 # 🚲 Bicimadness
 Aplicación web para el análisis de datos de BiciMAD basada en una arquitectura distribuida con frontend en React, backend en FastAPI y una base de datos DuckDB almacenada de forma privada. El proyecto está desplegado utilizando únicamente servicios gratuitos y con control de acceso al frontend.
----
+
 ## Índice
 
 1. Descripción general  
@@ -12,7 +12,7 @@ Aplicación web para el análisis de datos de BiciMAD basada en una arquitectura
 7. Almacenamiento (Cloudflare R2)  
 8. Seguridad y control de acceso  
 
----
+
 
 ## **1. Descripción general**
 
@@ -20,7 +20,7 @@ Bicimadness es una aplicación web que permite consultar y analizar datos histó
 
 Los datos no se incluyen en el repositorio y se gestionan de forma privada mediante almacenamiento externo.
 
----
+
 
 ## **2. URLs del proyecto**
 
@@ -30,7 +30,7 @@ https://tgisbicimad.jjimenezfernan.workers.dev/
 Backend / API:
 https://bicimadness.onrender.com/
 
----
+
 
 ## **3. Arquitectura**
 
@@ -43,7 +43,7 @@ La arquitectura del proyecto es la siguiente:
 - El backend descarga el archivo DuckDB desde Cloudflare R2 al arrancar.
 - DuckDB se abre en modo de solo lectura para realizar consultas.
 
----
+
 
 ## **4. Frontend**
 
@@ -54,7 +54,7 @@ La arquitectura del proyecto es la siguiente:
 - El código del frontend no contiene datos sensibles
 - No es necesario modificar el frontend para la autenticación
 
----
+
 
 ## **5. Backend / API**
 
@@ -69,7 +69,7 @@ La arquitectura del proyecto es la siguiente:
 
 El backend se inicia descargando la base de datos desde Cloudflare R2 y después levanta el servidor FastAPI.
 
----
+
 
 ## **6. Base de datos**
 
@@ -79,7 +79,7 @@ El backend se inicia descargando la base de datos desde Cloudflare R2 y después
 - El archivo no se encuentra en el repositorio
 - El backend abre la base de datos localmente tras descargarla
 
----
+
 
 ## **7. Almacenamiento (Cloudflare R2)**
 
@@ -90,7 +90,7 @@ El backend se inicia descargando la base de datos desde Cloudflare R2 y después
 - Credenciales: solo lectura para el backend
 - No hay costes de salida de datos (egress)
 
----
+
 
 ## **8. Seguridad y control de acceso**
 
@@ -107,7 +107,7 @@ El backend se inicia descargando la base de datos desde Cloudflare R2 y después
 - La base de datos es de solo lectura
 - No existen endpoints de escritura destructiva
 
----
+
 
 ## **9. Costes**
 
