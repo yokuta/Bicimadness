@@ -27,6 +27,9 @@ DB_PATH = os.getenv("DUCKDB_PATH", "./data/bicimad.duckdb")
 
 con = duckdb.connect(DB_PATH, read_only=True)
 
+@app.get("/health")
+def health():
+    return {"ok": True}
 
 # ---------------------------------------------------------
 #  ENDPOINT EXISTENTE: un día concreto (JSON)
