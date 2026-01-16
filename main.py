@@ -77,63 +77,6 @@ def get_estacion(
     return records
 
 
-# ---------------------------------------------------------
-#  NUEVO ENDPOINT: rango de fechas -> XLSX
-# ---------------------------------------------------------
-@app.get("/api/estacion_rango_xlsx")
-def get_estacion_rango_xlsx(
-    idestacion: str = Query(..., description="ID de la estación"),
-    fecha_inicio: date = Query(..., description="Fecha inicio (YYYY-MM-DD)"),
-    fecha_fin: date = Query(..., description="Fecha fin (YYYY-MM-DD)"),
-):
-    """
-    Devuelve TODOS los registros horarios de una estación entre fecha_inicio y fecha_fin
-    (ambas incluidas) en formato Excel (XLSX).
-    """
-    sql = """
-        SELECT
-            e.idestacion,
-            e.fecha,
-            e.hora,
-            e.fechaHora,
-            e.ancladas,
-            e.baseslibres,
-            e.overflow,
-            e.activa,
-            h.latitud,
-            h.longitud,
-            h.denominacion
-        FROM estaciones e
-        JOIN HistEstaciones h
-          ON e.idestacion = h.idestacion
-         AND e.fechaHora BETWEEN h.inicio AND h.fin
-        WHERE e.idestacion = ?
-          AND e.fecha BETWEEN ?::DATE AND ?::DATE
-        ORDER BY e.fecha, e.hora
-    """
-
-    df = con.execute(sql, [idestacion, fecha_inicio, fecha_fin]).df()
-
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="datos")
-
-    output.seek(0)
-
-    filename = f"bicimad_{idestacion}_{fecha_inicio}_{fecha_fin}.xlsx"
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"'
-    }
-
-    return StreamingResponse(
-        output,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
-        headers=headers,
-    )
-
 @app.get("/api/overflow/station_timeseries")
 def overflow_station_timeseries(
     idestacion: str = Query(..., description="ID de la estación"),
@@ -694,4 +637,163 @@ def overflow_capacity_analysis(
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in rows]
 
+
+"""
+Análisis semanal ENDPOINTS
+"""
+# =======================
+# ACTIVA (OPEN/CLOSED) ANALYSIS ENDPOINTS
+# =======================
+
+from typing import List, Dict, Any
+
+def _normalize_status(open_obs: int, closed_obs: int) -> str:
+    if open_obs > 0 and closed_obs == 0:
+        return "always_open"     # green
+    if closed_obs > 0 and open_obs == 0:
+        return "always_closed"   # red
+    return "mixed"              # yellow
+
+
+@app.get("/api/activa/city_summary")
+def activa_city_summary(
+    start: str = Query(..., description="YYYY-MM-DD (incluida)"),
+    end: str = Query(..., description="YYYY-MM-DD (incluida)"),
+):
+    """
+    Devuelve resumen por estación en un rango:
+    - open_obs / closed_obs (nº observaciones)
+    - status: always_open | mixed | always_closed
+    - latitud/longitud/denominacion (para pintar en mapa)
+    """
+    sql = """
+        SELECT
+            e.idestacion,
+            h.denominacion,
+            h.latitud,
+            h.longitud,
+            SUM(CASE WHEN COALESCE(CAST(e.activa AS INTEGER), 0) = 1 THEN 1 ELSE 0 END) AS open_obs,
+            SUM(CASE WHEN COALESCE(CAST(e.activa AS INTEGER), 0) = 0 THEN 1 ELSE 0 END) AS closed_obs,
+            COUNT(*) AS total_obs
+        FROM estaciones e
+        JOIN HistEstaciones h
+          ON e.idestacion = h.idestacion
+         AND e.fechaHora BETWEEN h.inicio AND h.fin
+        WHERE e.fecha BETWEEN ?::DATE AND ?::DATE
+        GROUP BY e.idestacion, h.denominacion, h.latitud, h.longitud
+        ORDER BY e.idestacion
+    """
+    cur = con.execute(sql, [start, end])
+    rows = cur.fetchall()
+    if cur.description is None or not rows:
+        return {
+            "start": start,
+            "end": end,
+            "totals": {"stations": 0, "always_open": 0, "mixed": 0, "always_closed": 0},
+            "stations": [],
+        }
+
+    cols = [d[0] for d in cur.description]
+    stations = [dict(zip(cols, r)) for r in rows]
+
+    always_open = mixed = always_closed = 0
+    for s in stations:
+        oo = int(s.get("open_obs") or 0)
+        cc = int(s.get("closed_obs") or 0)
+        status = _normalize_status(oo, cc)
+        s["status"] = status
+        if status == "always_open":
+            always_open += 1
+        elif status == "always_closed":
+            always_closed += 1
+        else:
+            mixed += 1
+
+    return {
+        "start": start,
+        "end": end,
+        "totals": {
+            "stations": len(stations),
+            "always_open": always_open,
+            "mixed": mixed,
+            "always_closed": always_closed,
+        },
+        "stations": stations,
+    }
+
+
+@app.get("/api/activa/station_status")
+def activa_station_status(
+    idestacion: str = Query(..., description="ID estación"),
+    start: str = Query(..., description="YYYY-MM-DD (incluida)"),
+    end: str = Query(..., description="YYYY-MM-DD (incluida)"),
+):
+    """
+    Devuelve detalle de una estación en un rango:
+    - status (always_open/mixed/always_closed)
+    - closed_moments: lista de instantes (fecha, hora, fechaHora) donde activa=0
+      (solo útil para mixed o always_closed)
+    """
+    sql = """
+        SELECT
+            e.idestacion,
+            e.fecha,
+            e.hora,
+            e.fechaHora,
+            COALESCE(CAST(e.activa AS INTEGER), 0) AS activa,
+            h.denominacion,
+            h.latitud,
+            h.longitud
+        FROM estaciones e
+        JOIN HistEstaciones h
+          ON e.idestacion = h.idestacion
+         AND e.fechaHora BETWEEN h.inicio AND h.fin
+        WHERE e.idestacion = ?
+          AND e.fecha BETWEEN ?::DATE AND ?::DATE
+        ORDER BY e.fecha, e.hora
+    """
+    cur = con.execute(sql, [idestacion, start, end])
+    rows = cur.fetchall()
+    if cur.description is None or not rows:
+        return {
+            "idestacion": idestacion,
+            "start": start,
+            "end": end,
+            "status": "no_data",
+            "open_obs": 0,
+            "closed_obs": 0,
+            "closed_moments": [],
+        }
+
+    cols = [d[0] for d in cur.description]
+    recs = [dict(zip(cols, r)) for r in rows]
+
+    open_obs = 0
+    closed_obs = 0
+    closed_moments = []
+    for r in recs:
+        if int(r["activa"]) == 1:
+            open_obs += 1
+        else:
+            closed_obs += 1
+            closed_moments.append(
+                {"fecha": str(r["fecha"]), "hora": int(r["hora"]), "fechaHora": str(r["fechaHora"])}
+            )
+
+    status = _normalize_status(open_obs, closed_obs)
+
+    # devolvemos también meta (denominacion/coords) del primer registro
+    first = recs[0]
+    return {
+        "idestacion": idestacion,
+        "denominacion": first.get("denominacion"),
+        "latitud": first.get("latitud"),
+        "longitud": first.get("longitud"),
+        "start": start,
+        "end": end,
+        "status": status,
+        "open_obs": open_obs,
+        "closed_obs": closed_obs,
+        "closed_moments": closed_moments,
+    }
 
