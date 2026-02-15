@@ -800,16 +800,35 @@ def activa_station_status(
 """
 NEWWW
 """
+from fastapi import HTTPException
+
 @app.get("/api/estacion_meta")
 def estacion_meta(idestacion: str = Query(...)):
     sql = """
-      SELECT h.idestacion, h.denominacion, h.latitud, h.longitud
-      FROM HistEstaciones h
-      WHERE h.idestacion = ?
-      ORDER BY h.fin DESC
+      SELECT
+        e.idestacion,
+        h.denominacion,
+        h.latitud,
+        h.longitud
+      FROM estaciones e
+      JOIN HistEstaciones h
+        ON e.idestacion = h.idestacion
+       AND e.fechaHora BETWEEN h.inicio AND h.fin
+      WHERE e.idestacion = ?
+      ORDER BY e.fechaHora DESC
       LIMIT 1
     """
-    ...
+    con = duckdb.connect(DB_PATH, read_only=True)
+    try:
+        cur = con.execute(sql, [idestacion])
+        row = cur.fetchone()
+        if not row:
+            # mejor 404 que None, así lo ves claro en consola/red
+            raise HTTPException(status_code=404, detail="Station not found in meta join")
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+    finally:
+        con.close()
 
 
 # ============================================================
