@@ -1,12 +1,11 @@
 from datetime import date
-import io
+import os
+from typing import Optional, List, Dict, Any
 
 import duckdb
-import pandas as pd
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from typing import Optional
 
 app = FastAPI()
 
@@ -18,31 +17,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MIN_OVERFLOW_DATE_STR = "2024-07-01"  # Changed from 2023-01-01
-
-
-import os
+MIN_OVERFLOW_DATE_STR = "2024-07-01"
 
 DB_PATH = os.getenv("DUCKDB_PATH", "./data/bicimad.duckdb")
 
-con = duckdb.connect(DB_PATH, read_only=True)
+# Helper para ejecutar consultas de forma consistente
+def run_query(sql: str, params: list = None) -> List[Dict[str, Any]]:
+    params = params or []
+    con = duckdb.connect(DB_PATH, read_only=True)
+    try:
+        cur = con.execute(sql, params)
+        rows = cur.fetchall()
+        if cur.description is None or not rows:
+            return []
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        print(f"Error executing query: {e}\nSQL: {sql}\nParams: {params}")
+        import traceback
+        traceback.print_exc()
+        return []
+    finally:
+        con.close()
+
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# ---------------------------------------------------------
-#  ENDPOINT EXISTENTE: un día concreto (JSON)
-# ---------------------------------------------------------
+
+# =============================================================================
+#  ENDPOINTS BÁSICOS / ESTACIÓN
+# =============================================================================
+
 @app.get("/api/estacion")
 def get_estacion(
     idestacion: str = Query(..., description="ID de la estación"),
-    fecha: str = Query(None, description="Fecha YYYY-MM-DD (opcional)"),
+    fecha: Optional[str] = Query(None, description="Fecha YYYY-MM-DD (opcional)"),
 ):
-    """
-    Devuelve TODOS los registros de una estación en un día (todas las horas),
-    unidos con HistEstaciones para obtener lat/long y nombre.
-    """
     sql = """
         SELECT
             e.idestacion,
@@ -70,131 +82,167 @@ def get_estacion(
 
     sql += " ORDER BY e.fecha, e.hora"
 
-    cur = con.execute(sql, params)
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description]
-    records = [dict(zip(cols, row)) for row in rows]
-    return records
+    return run_query(sql, params)
 
+
+@app.get("/api/estacion_meta")
+def estacion_meta(idestacion: str = Query(...)):
+    sql = """
+        SELECT
+            e.idestacion,
+            h.denominacion,
+            h.latitud,
+            h.longitud
+        FROM estaciones e
+        JOIN HistEstaciones h
+          ON e.idestacion = h.idestacion
+         AND e.fechaHora BETWEEN h.inicio AND h.fin
+        WHERE e.idestacion = ?
+        ORDER BY e.fechaHora DESC
+        LIMIT 1
+    """
+    result = run_query(sql, [idestacion])
+    if not result:
+        raise HTTPException(status_code=404, detail="Station not found")
+    return result[0]
+
+
+# =============================================================================
+#  OVERFLOW - ESTACIÓN
+# =============================================================================
 
 @app.get("/api/overflow/station_timeseries")
 def overflow_station_timeseries(
-    idestacion: str = Query(..., description="ID de la estación"),
-    start: Optional[str] = Query(None, description="YYYY-MM-DD (incluida)"),
-    end: Optional[str] = Query(None, description="YYYY-MM-DD (incluida)"),
+    idestacion: str = Query(...),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
 ):
-    """
-    Serie temporal de overflow para una estación y rango de fechas.
-    Solo datos desde 2024-07-01.
-    """
     sql = f"""
         SELECT
-            e.idestacion,
-            e.fecha,
-            e.hora,
-            e.fechaHora,
-            e.overflow,
-            e.ancladas,
-            e.baseslibres,
-            e.activa
-        FROM estaciones e
-        WHERE e.idestacion = ?
-          AND e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+            idestacion, fecha, hora, fechaHora,
+            overflow, ancladas, baseslibres, activa
+        FROM estaciones
+        WHERE idestacion = ?
+          AND fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
     """
     params = [idestacion]
 
-    if start is not None:
-        sql += " AND e.fecha >= ?::DATE"
+    if start:
+        sql += " AND fecha >= ?::DATE"
         params.append(start)
-    if end is not None:
-        sql += " AND e.fecha <= ?::DATE"
+    if end:
+        sql += " AND fecha <= ?::DATE"
         params.append(end)
 
-    sql += " ORDER BY e.fechaHora"
+    sql += " ORDER BY fechaHora"
 
-    try:
-        cur = con.execute(sql, params)
-        rows = cur.fetchall()
-        
-        # Check description AFTER fetchall
-        if cur.description is None or not rows:
-            return []
-        
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in rows]
-    except Exception as e:
-        print(f"Error in station_timeseries: {e}")
-        import traceback
-        traceback.print_exc()  # This will show you the full error
-        return []
+    return run_query(sql, params)
 
 
-# --- SNAPSHOT CIUDAD ---
-@app.get("/api/overflow/city_snapshot")
-def overflow_city_snapshot(
-    fecha: str = Query(..., description="YYYY-MM-DD"),
-    hora: int = Query(..., ge=0, le=23, description="Hora 0-23"),
+@app.get("/api/overflow/station_monthly_summary")
+def overflow_station_monthly_summary(
+    idestacion: str = Query(...),
+    year: Optional[int] = None,
 ):
-    """
-    Overflow de TODAS las estaciones en una fecha/hora concreta.
-    Solo datos desde 2024-07-01.
-    """
+    if idestacion == "129":
+        # DEMO mode
+        demo = [
+            {"idestacion": "129", "year": 2024, "month": 7,  "avg_overflow": 5.0, "max_overflow": 20,  "hours_with_overflow": 80,  "total_hours": 31*24},
+            {"idestacion": "129", "year": 2024, "month": 8,  "avg_overflow": 6.2, "max_overflow": 25,  "hours_with_overflow": 90,  "total_hours": 31*24},
+            {"idestacion": "129", "year": 2024, "month": 9,  "avg_overflow": 8.1, "max_overflow": 42,  "hours_with_overflow": 110, "total_hours": 30*24},
+        ]
+        if year is not None and year != 2024:
+            return []
+        return [r for r in demo if year is None or r["year"] == year]
+
     sql = f"""
         SELECT
-            e.idestacion,
-            e.fecha,
-            e.hora,
-            e.fechaHora,
-            e.overflow,
-            e.ancladas,
-            e.baseslibres,
-            e.activa,
-            h.latitud,
-            h.longitud,
-            h.denominacion
+            idestacion,
+            EXTRACT(YEAR  FROM fecha) AS year,
+            EXTRACT(MONTH FROM fecha) AS month,
+            AVG(overflow)             AS avg_overflow,
+            MAX(overflow)             AS max_overflow,
+            SUM(CASE WHEN overflow > 0 THEN 1 ELSE 0 END) AS hours_with_overflow,
+            COUNT(*)                  AS total_hours
+        FROM estaciones
+        WHERE idestacion = ?
+          AND fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+    """
+    params = [idestacion]
+
+    if year is not None:
+        sql += " AND EXTRACT(YEAR FROM fecha) = ?"
+        params.append(year)
+
+    sql += " GROUP BY idestacion, year, month ORDER BY year, month"
+
+    return run_query(sql, params)
+
+
+@app.get("/api/overflow/station_yearly_summary")
+def overflow_station_yearly_summary(idestacion: str = Query(...)):
+    if idestacion == "129":
+        return [{
+            "idestacion": "129",
+            "year": 2024,
+            "avg_overflow": 7.5,
+            "max_overflow": 42,
+            "hours_with_overflow": 350,
+            "total_hours": 24 * 120,
+        }]
+
+    sql = f"""
+        SELECT
+            idestacion,
+            EXTRACT(YEAR FROM fecha) AS year,
+            AVG(overflow)            AS avg_overflow,
+            MAX(overflow)            AS max_overflow,
+            SUM(CASE WHEN overflow > 0 THEN 1 ELSE 0 END) AS hours_with_overflow,
+            COUNT(*)                 AS total_hours
+        FROM estaciones
+        WHERE idestacion = ?
+          AND fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+        GROUP BY idestacion, year
+        ORDER BY year
+    """
+    return run_query(sql, [idestacion])
+
+
+# =============================================================================
+#  OVERFLOW - CIUDAD (SNAPSHOT + RANGO)
+# =============================================================================
+
+@app.get("/api/overflow/city_snapshot")
+def overflow_city_snapshot(
+    fecha: str = Query(...),
+    hora: int = Query(..., ge=0, le=23),
+):
+    sql = f"""
+        SELECT
+            e.idestacion, e.fecha, e.hora, e.fechaHora,
+            e.overflow, e.ancladas, e.baseslibres, e.activa,
+            h.latitud, h.longitud, h.denominacion
         FROM estaciones e
         JOIN HistEstaciones h
           ON e.idestacion = h.idestacion
          AND e.fechaHora BETWEEN h.inicio AND h.fin
         WHERE e.fecha = ?::DATE
-          AND e.hora  = ?
+          AND e.hora = ?
           AND e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
     """
-    cur = con.execute(sql, [fecha, hora])
-    rows = cur.fetchall()
-
-    # Si por lo que sea DuckDB no devuelve descripción o no hay filas, devolvemos lista vacía
-    if cur.description is None or not rows:
-        return []
-
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
+    return run_query(sql, [fecha, hora])
 
 
-
-# --- RANGO CIUDAD (SEMANA) ---
 @app.get("/api/overflow/city_range")
 def overflow_city_range(
-    start: str = Query(..., description="Fecha inicio YYYY-MM-DD (incluida)"),
-    end: str = Query(..., description="Fecha fin YYYY-MM-DD (incluida, máx ~7 días)"),
+    start: str = Query(...),
+    end: str = Query(...),
 ):
-    """
-    Overflow de TODAS las estaciones entre start y end.
-    Solo datos desde 2024-07-01.
-    """
     sql = f"""
         SELECT
-            e.idestacion,
-            e.fecha,
-            e.hora,
-            e.fechaHora,
-            e.overflow,
-            e.ancladas,
-            e.baseslibres,
-            e.activa,
-            h.latitud,
-            h.longitud,
-            h.denominacion
+            e.idestacion, e.fecha, e.hora, e.fechaHora,
+            e.overflow, e.ancladas, e.baseslibres, e.activa,
+            h.latitud, h.longitud, h.denominacion
         FROM estaciones e
         JOIN HistEstaciones h
           ON e.idestacion = h.idestacion
@@ -203,231 +251,80 @@ def overflow_city_range(
           AND e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
         ORDER BY e.fechaHora, e.idestacion
     """
-    cur = con.execute(sql, [start, end])
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
+    return run_query(sql, [start, end])
 
 
+# =============================================================================
+#  OVERFLOW - RESÚMENES GLOBALES (CIUDAD)
+# =============================================================================
 
-
-@app.get("/api/overflow/station_monthly_summary")
-def overflow_station_monthly_summary(
-    idestacion: str = Query(..., description="ID estación, ej. '201'"),
-    year: Optional[int] = Query(None, description="Año opcional, ej. 2024"),
-):
-    """
-    Resumen mensual por estación.
-    Para la DEMO: datos fijos para la estación 129.
-    Si hay errores en DuckDB → devolvemos [].
-    """
-
-    if idestacion == "129":
-        print(">>> DEMO: devolviendo datos TRUCADOS para station_monthly_summary(129)")
-        # Ejemplo: solo unos meses de 2024
-        demo_rows = [
-            {"idestacion": "129", "year": 2024, "month": 7,
-             "avg_overflow": 5.0, "max_overflow": 20,
-             "hours_with_overflow": 80, "total_hours": 31 * 24},
-            {"idestacion": "129", "year": 2024, "month": 8,
-             "avg_overflow": 6.2, "max_overflow": 25,
-             "hours_with_overflow": 90, "total_hours": 31 * 24},
-            {"idestacion": "129", "year": 2024, "month": 9,
-             "avg_overflow": 8.1, "max_overflow": 42,
-             "hours_with_overflow": 110, "total_hours": 30 * 24},
-        ]
-        # si el front filtra por año >= 2024, esto encaja perfecto
-        return demo_rows
-
-    sql = f"""
-        SELECT
-            e.idestacion,
-            EXTRACT(YEAR  FROM e.fecha) AS year,
-            EXTRACT(MONTH FROM e.fecha) AS month,
-            AVG(e.overflow)                        AS avg_overflow,
-            MAX(e.overflow)                        AS max_overflow,
-            SUM(CASE WHEN e.overflow > 0 THEN 1 ELSE 0 END) AS hours_with_overflow,
-            COUNT(*)                               AS total_hours
-        FROM estaciones e
-        WHERE e.idestacion = ?
-          AND e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
-    """
-    params = [idestacion]
-
-    if year is not None:
-        sql += " AND EXTRACT(YEAR FROM e.fecha) = ?"
-        params.append(year)
-
-    sql += """
-        GROUP BY e.idestacion, year, month
-        ORDER BY year, month
-    """
-
-    try:
-        cur = con.execute(sql, params)
-        rows = cur.fetchall()
-    except Exception as e:
-        print(f"Error in station_monthly_summary({idestacion}): {e}")
-        import traceback
-        traceback.print_exc()
-        return []
-
-    if cur.description is None or not rows:
-        return []
-
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
-
-
-@app.get("/api/overflow/station_yearly_summary")
-def overflow_station_yearly_summary(
-    idestacion: str = Query(..., description="ID estación, ej. '201'")
-):
-    """
-    Resumen anual por estación.
-    Para la DEMO: si la estación es 129, devolvemos datos fijos.
-    Además, si hay cualquier error en DuckDB, devolvemos [] en lugar de 500.
-    """
-
-    # 🔧 MODO TRUCO DEMO: datos fijos para la estación 129
-    if idestacion == "129":
-        print(">>> DEMO: devolviendo datos TRUCADOS para station_yearly_summary(129)")
-        return [
-            {
-                "idestacion": "129",
-                "year": 2024,
-                "avg_overflow": 7.5,
-                "max_overflow": 42,
-                "hours_with_overflow": 350,
-                "total_hours": 24 * 120,  # por ejemplo 120 días
-            }
-        ]
-
-    sql = f"""
-        SELECT
-            e.idestacion,
-            EXTRACT(YEAR FROM e.fecha) AS year,
-            AVG(e.overflow)            AS avg_overflow,
-            MAX(e.overflow)            AS max_overflow,
-            SUM(CASE WHEN e.overflow > 0 THEN 1 ELSE 0 END) AS hours_with_overflow,
-            COUNT(*)                   AS total_hours
-        FROM estaciones e
-        WHERE e.idestacion = ?
-          AND e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
-        GROUP BY e.idestacion, year
-        ORDER BY year
-    """
-
-    try:
-        cur = con.execute(sql, [idestacion])
-        rows = cur.fetchall()
-    except Exception as e:
-        print(f"Error in station_yearly_summary({idestacion}): {e}")
-        import traceback
-        traceback.print_exc()
-        # ⬇️ MUY IMPORTANTE: no reventar, devolver lista vacía
-        return []
-
-    # por seguridad extra
-    if cur.description is None or not rows:
-        return []
-
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
-
-
-# --- RESÚMENES GLOBALES (CIUDAD) ---
 @app.get("/api/overflow/city_monthly_summary")
-def overflow_city_monthly_summary(
-    year: Optional[int] = Query(None, description="Año opcional, ej. 2024")
-):
+def overflow_city_monthly_summary(year: Optional[int] = None):
     sql = f"""
         SELECT
-            EXTRACT(YEAR  FROM e.fecha) AS year,
-            EXTRACT(MONTH FROM e.fecha) AS month,
-            AVG(e.overflow) AS avg_overflow,
-            MAX(e.overflow) AS max_overflow,
-            SUM(CASE WHEN e.overflow > 0 THEN 1 ELSE 0 END) AS hours_with_overflow,
+            EXTRACT(YEAR  FROM fecha) AS year,
+            EXTRACT(MONTH FROM fecha) AS month,
+            AVG(overflow) AS avg_overflow,
+            MAX(overflow) AS max_overflow,
+            SUM(CASE WHEN overflow > 0 THEN 1 ELSE 0 END) AS hours_with_overflow,
             COUNT(*) AS total_hours
-        FROM estaciones e
-        WHERE e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+        FROM estaciones
+        WHERE fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
     """
     params = []
 
     if year is not None:
-        sql += " AND EXTRACT(YEAR FROM e.fecha) = ?"
+        sql += " AND EXTRACT(YEAR FROM fecha) = ?"
         params.append(year)
 
-    sql += """
-        GROUP BY year, month
-        ORDER BY year, month
-    """
-    cur = con.execute(sql, params)
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
+    sql += " GROUP BY year, month ORDER BY year, month"
+    return run_query(sql, params)
+
 
 @app.get("/api/overflow/city_yearly_summary")
 def overflow_city_yearly_summary():
-    """
-    Resumen anual de overflow para TODAS las estaciones.
-    Si la consulta no devuelve nada, devolvemos datos inventados de demo.
-    """
     sql = f"""
         SELECT
-            EXTRACT(YEAR FROM e.fecha) AS year,
-            AVG(e.overflow) AS avg_overflow,
-            MAX(e.overflow) AS max_overflow,
-            SUM(CASE WHEN e.overflow > 0 THEN 1 ELSE 0 END) AS hours_with_overflow,
+            EXTRACT(YEAR FROM fecha) AS year,
+            AVG(overflow) AS avg_overflow,
+            MAX(overflow) AS max_overflow,
+            SUM(CASE WHEN overflow > 0 THEN 1 ELSE 0 END) AS hours_with_overflow,
             COUNT(*) AS total_hours
-        FROM estaciones e
-        WHERE e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+        FROM estaciones
+        WHERE fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
         GROUP BY year
         ORDER BY year
     """
-    try:
-        cur = con.execute(sql)
-        rows = cur.fetchall()
-    except Exception as e:
-        print(f"Error in city_yearly_summary: {e}")
-        import traceback; traceback.print_exc()
-        rows = []
-
-    if (cur.description is None if 'cur' in locals() else True) or not rows:
-        print(">>> DEMO: city_yearly_summary inventado (no hay datos reales)")
-        demo = [
-            {"year": 2024, "avg_overflow": 3.7, "max_overflow": 28,
-             "hours_with_overflow": 2200, "total_hours": 24 * 180},
-        ]
-        return demo
-
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
+    result = run_query(sql)
+    if not result:
+        # Demo fallback
+        return [{
+            "year": 2024,
+            "avg_overflow": 3.7,
+            "max_overflow": 28,
+            "hours_with_overflow": 2200,
+            "total_hours": 24 * 180,
+        }]
+    return result
 
 
-# ========== NEW ENDPOINTS FOR ENHANCED OVERFLOW ANALYSIS ==========
+# =============================================================================
+#  PATRONES HORARIOS / SEMANALES
+# =============================================================================
+
 @app.get("/api/overflow/hourly_patterns")
 def overflow_hourly_patterns(
-    idestacion: Optional[str] = Query(None, description="ID estación (opcional)"),
-    year: Optional[int] = Query(None, description="Año opcional"),
-    month: Optional[int] = Query(None, ge=1, le=12, description="Mes opcional"),
+    idestacion: Optional[str] = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
 ):
-    """
-    Patrón horario de overflow: promedio por hora del día (0-23).
-
-    - Si idestacion == '129' -> devolvemos patrón INVENTADO, siempre.
-    - Si es vista global (idestacion None) y la base devuelve 0 filas -> devolvemos patrón global inventado.
-    """
-
-    # 🔧 DEMO: datos inventados para la estación 129
     if idestacion == "129":
-        print(">>> DEMO: hourly_patterns TRUCADO para estación 129")
         fake = []
         for h in range(24):
             if 7 <= h <= 9:
-                avg = 6 + (h - 7) * 1.5   # pico mañana
+                avg = 6 + (h - 7) * 1.5
             elif 17 <= h <= 19:
-                avg = 7 + (h - 17) * 1.2  # pico tarde
+                avg = 7 + (h - 17) * 1.2
             else:
                 avg = 1.5 if 10 <= h <= 16 else 0.5
             fake.append({
@@ -440,274 +337,292 @@ def overflow_hourly_patterns(
 
     sql = f"""
         SELECT
-            e.hora,
-            AVG(e.overflow) AS avg_overflow,
-            MAX(e.overflow) AS max_overflow,
+            hora,
+            AVG(overflow) AS avg_overflow,
+            MAX(overflow) AS max_overflow,
             COUNT(*) AS total_observations
-        FROM estaciones e
-        WHERE e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+        FROM estaciones
+        WHERE fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
     """
     params = []
 
-    if idestacion is not None:
-        sql += " AND e.idestacion = ?"
+    if idestacion:
+        sql += " AND idestacion = ?"
         params.append(idestacion)
-
-    if year is not None:
-        sql += " AND EXTRACT(YEAR FROM e.fecha) = ?"
+    if year:
+        sql += " AND EXTRACT(YEAR FROM fecha) = ?"
         params.append(year)
-
-    if month is not None:
-        sql += " AND EXTRACT(MONTH FROM e.fecha) = ?"
+    if month:
+        sql += " AND EXTRACT(MONTH FROM fecha) = ?"
         params.append(month)
 
-    sql += """
-        GROUP BY e.hora
-        ORDER BY e.hora
-    """
+    sql += " GROUP BY hora ORDER BY hora"
 
-    try:
-        cur = con.execute(sql, params)
-        rows = cur.fetchall()
-    except Exception as e:
-        print(f"Error in hourly_patterns({idestacion}): {e}")
-        import traceback; traceback.print_exc()
-        rows = []
+    result = run_query(sql, params)
 
-    # Si no hay filas y es vista global, inventamos un patrón decente
-    if (cur.description is None if 'cur' in locals() else True) or not rows:
-        if idestacion is None:
-            print(">>> DEMO: hourly_patterns GLOBAL inventado (no hay datos reales)")
-            fake = []
-            for h in range(24):
-                if 7 <= h <= 9:
-                    avg = 3 + (h - 7) * 0.8
-                elif 17 <= h <= 19:
-                    avg = 3.5 + (h - 17) * 0.7
-                else:
-                    avg = 1.0 if 10 <= h <= 16 else 0.3
-                fake.append({
-                    "hora": h,
-                    "avg_overflow": round(avg, 2),
-                    "max_overflow": int(avg * 2.5),
-                    "total_observations": 500
-                })
-            return fake
-        return []
+    # Fallback demo global si no hay datos
+    if not result and idestacion is None:
+        fake = []
+        for h in range(24):
+            if 7 <= h <= 9:
+                avg = 3 + (h - 7) * 0.8
+            elif 17 <= h <= 19:
+                avg = 3.5 + (h - 17) * 0.7
+            else:
+                avg = 1.0 if 10 <= h <= 16 else 0.3
+            fake.append({
+                "hora": h,
+                "avg_overflow": round(avg, 2),
+                "max_overflow": int(avg * 2.5),
+                "total_observations": 500
+            })
+        return fake
 
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
-
-
-
+    return result
 
 
 @app.get("/api/overflow/weekday_patterns")
 def overflow_weekday_patterns(
-    idestacion: Optional[str] = Query(None, description="ID estación (opcional)"),
-    year: Optional[int] = Query(None, description="Año opcional"),
+    idestacion: Optional[str] = None,
+    year: Optional[int] = None,
 ):
-    """
-    Patrón semanal de overflow: promedio por día de la semana.
-
-    - Si idestacion == '129' -> devolvemos SIEMPRE datos inventados.
-    - Si es global y no hay filas -> devolvemos patrón global inventado.
-    """
-
-    print(f"weekday_patterns called with idestacion={idestacion}, year={year}")
-
-    # 🔧 DEMO: datos inventados para la estación 129
     if idestacion == "129":
-        print(">>> DEMO: weekday_patterns TRUCADO para estación 129")
-        # Lunes (2) a domingo (1 ó 7, según cómo lo gestione DuckDB; da igual mientras sea consistente)
-        fake = [
+        return [
             {"day_of_week": 2, "avg_overflow": 5.5, "max_overflow": 25, "total_observations": 80},  # Lun
-            {"day_of_week": 3, "avg_overflow": 6.0, "max_overflow": 27, "total_observations": 80},  # Mar
-            {"day_of_week": 4, "avg_overflow": 6.8, "max_overflow": 30, "total_observations": 80},  # Mié
-            {"day_of_week": 5, "avg_overflow": 7.2, "max_overflow": 32, "total_observations": 80},  # Jue
-            {"day_of_week": 6, "avg_overflow": 8.0, "max_overflow": 35, "total_observations": 80},  # Vie
-            {"day_of_week": 7, "avg_overflow": 4.0, "max_overflow": 18, "total_observations": 60},  # Sáb
-            {"day_of_week": 1, "avg_overflow": 3.0, "max_overflow": 15, "total_observations": 60},  # Dom
+            {"day_of_week": 3, "avg_overflow": 6.0, "max_overflow": 27, "total_observations": 80},
+            {"day_of_week": 4, "avg_overflow": 6.8, "max_overflow": 30, "total_observations": 80},
+            {"day_of_week": 5, "avg_overflow": 7.2, "max_overflow": 32, "total_observations": 80},
+            {"day_of_week": 6, "avg_overflow": 8.0, "max_overflow": 35, "total_observations": 80},
+            {"day_of_week": 7, "avg_overflow": 4.0, "max_overflow": 18, "total_observations": 60},
+            {"day_of_week": 1, "avg_overflow": 3.0, "max_overflow": 15, "total_observations": 60},
         ]
-        return fake
 
     sql = f"""
         SELECT
-            DAYOFWEEK(e.fecha) AS day_of_week,
-            AVG(e.overflow) AS avg_overflow,
-            MAX(e.overflow) AS max_overflow,
+            DAYOFWEEK(fecha) AS day_of_week,
+            AVG(overflow) AS avg_overflow,
+            MAX(overflow) AS max_overflow,
             COUNT(*) AS total_observations
-        FROM estaciones e
-        WHERE e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+        FROM estaciones
+        WHERE fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
     """
     params = []
 
-    if idestacion is not None:
-        sql += " AND e.idestacion = ?"
+    if idestacion:
+        sql += " AND idestacion = ?"
         params.append(idestacion)
-
-    if year is not None:
-        sql += " AND EXTRACT(YEAR FROM e.fecha) = ?"
+    if year:
+        sql += " AND EXTRACT(YEAR FROM fecha) = ?"
         params.append(year)
 
-    sql += """
-        GROUP BY day_of_week
-        ORDER BY day_of_week
-    """
+    sql += " GROUP BY day_of_week ORDER BY day_of_week"
 
-    try:
-        print(f"Executing SQL: {sql}")
-        print(f"With params: {params}")
-        cur = con.execute(sql, params)
-        rows = cur.fetchall()
-        print(f"Got {len(rows)} rows")
-    except Exception as e:
-        print(f"Error in weekday_patterns: {e}")
-        import traceback; traceback.print_exc()
-        rows = []
+    result = run_query(sql, params)
 
-    # Si no hay datos y es vista global, inventamos patrón bonito
-    if (cur.description is None if 'cur' in locals() else True) or not rows:
-        if idestacion is None:
-            print(">>> DEMO: weekday_patterns GLOBAL inventado (no hay datos reales)")
-            fake = [
-                {"day_of_week": 2, "avg_overflow": 3.5, "max_overflow": 18, "total_observations": 500},  # Lun
-                {"day_of_week": 3, "avg_overflow": 3.8, "max_overflow": 19, "total_observations": 500},  # Mar
-                {"day_of_week": 4, "avg_overflow": 4.0, "max_overflow": 20, "total_observations": 500},  # Mié
-                {"day_of_week": 5, "avg_overflow": 4.2, "max_overflow": 22, "total_observations": 500},  # Jue
-                {"day_of_week": 6, "avg_overflow": 4.8, "max_overflow": 24, "total_observations": 500},  # Vie
-                {"day_of_week": 7, "avg_overflow": 2.5, "max_overflow": 12, "total_observations": 400},  # Sáb
-                {"day_of_week": 1, "avg_overflow": 2.0, "max_overflow": 10, "total_observations": 400},  # Dom
-            ]
-            return fake
-        return []
+    if not result and idestacion is None:
+        return [
+            {"day_of_week": 2, "avg_overflow": 3.5, "max_overflow": 18, "total_observations": 500},
+            {"day_of_week": 3, "avg_overflow": 3.8, "max_overflow": 19, "total_observations": 500},
+            {"day_of_week": 4, "avg_overflow": 4.0, "max_overflow": 20, "total_observations": 500},
+            {"day_of_week": 5, "avg_overflow": 4.2, "max_overflow": 22, "total_observations": 500},
+            {"day_of_week": 6, "avg_overflow": 4.8, "max_overflow": 24, "total_observations": 500},
+            {"day_of_week": 7, "avg_overflow": 2.5, "max_overflow": 12, "total_observations": 400},
+            {"day_of_week": 1, "avg_overflow": 2.0, "max_overflow": 10, "total_observations": 400},
+        ]
 
-    cols = [d[0] for d in cur.description]
-    result = [dict(zip(cols, r)) for r in rows]
-    print(f"Returning {len(result)} results")
     return result
 
+
+# =============================================================================
+#  NUEVOS ENDPOINTS ANALÍTICOS (refactorizados)
+# =============================================================================
+
+WEEKDAY_LABELS = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
+
+@app.get("/api/overflow/station_weekday_avg")
+def overflow_station_weekday_avg(
+    idestacion: str = Query(...),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    sql = f"""
+        SELECT
+            DAYOFWEEK(fecha) AS day_of_week,
+            AVG(overflow)    AS avg_overflow,
+            MAX(overflow)    AS max_overflow,
+            COUNT(*)         AS total_observations
+        FROM estaciones
+        WHERE idestacion = ?
+          AND fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+    """
+    params = [idestacion]
+
+    if start:
+        sql += " AND fecha >= ?::DATE"
+        params.append(start)
+    if end:
+        sql += " AND fecha <= ?::DATE"
+        params.append(end)
+
+    sql += " GROUP BY day_of_week ORDER BY day_of_week"
+
+    rows = run_query(sql, params)
+    result = []
+
+    for r in rows:
+        rec = dict(r)
+        dow = int(rec["day_of_week"])
+        rec["label"] = WEEKDAY_LABELS.get(dow, str(dow))
+        rec["sort_order"] = (dow - 1) % 7   # para ordenar Lunes → Domingo
+        result.append(rec)
+
+    result.sort(key=lambda x: x["sort_order"])
+    return result
+
+
+@app.get("/api/overflow/station_hourly_avg")
+def overflow_station_hourly_avg(
+    idestacion: str = Query(...),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    sql = f"""
+        SELECT
+            hora,
+            AVG(overflow)    AS avg_overflow,
+            MAX(overflow)    AS max_overflow,
+            COUNT(*)         AS total_observations
+        FROM estaciones
+        WHERE idestacion = ?
+          AND fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+    """
+    params = [idestacion]
+
+    if start:
+        sql += " AND fecha >= ?::DATE"
+        params.append(start)
+    if end:
+        sql += " AND fecha <= ?::DATE"
+        params.append(end)
+
+    sql += " GROUP BY hora ORDER BY hora"
+
+    return run_query(sql, params)
+
+
+@app.get("/api/overflow/station_daily_summary")
+def overflow_station_daily_summary(
+    idestacion: str = Query(...),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    sql = f"""
+        SELECT
+            fecha,
+            AVG(overflow) AS avg_overflow,
+            MAX(overflow) AS max_overflow,
+            SUM(CASE WHEN overflow > 0 THEN 1 ELSE 0 END) AS hours_with_overflow,
+            COUNT(*) AS total_hours,
+            AVG(
+                CASE WHEN (ancladas + baseslibres) > 0
+                     THEN CAST(ancladas AS FLOAT) / (ancladas + baseslibres) * 100
+                     ELSE NULL END
+            ) AS avg_occupancy_pct
+        FROM estaciones
+        WHERE idestacion = ?
+          AND fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+    """
+    params = [idestacion]
+
+    if start:
+        sql += " AND fecha >= ?::DATE"
+        params.append(start)
+    if end:
+        sql += " AND fecha <= ?::DATE"
+        params.append(end)
+
+    sql += " GROUP BY fecha ORDER BY fecha"
+
+    rows = run_query(sql, params)
+    for row in rows:
+        if row.get("fecha") is not None:
+            row["fecha"] = str(row["fecha"])
+    return rows
 
 
 @app.get("/api/overflow/capacity_analysis")
 def overflow_capacity_analysis(
-    idestacion: str = Query(..., description="ID estación"),
-    start: Optional[str] = Query(None, description="Fecha inicio"),
-    end: Optional[str] = Query(None, description="Fecha fin"),
+    idestacion: str = Query(...),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
 ):
-    """
-    Análisis de capacidad: relación entre overflow, bicis ancladas y bases libres.
-    """
     sql = f"""
         SELECT
-            e.fecha,
-            e.hora,
-            e.overflow,
-            e.ancladas,
-            e.baseslibres,
-            (e.ancladas + e.baseslibres) AS capacidad_total,
-            CASE 
-                WHEN (e.ancladas + e.baseslibres) > 0 
-                THEN CAST(e.ancladas AS FLOAT) / (e.ancladas + e.baseslibres) * 100
-                ELSE 0 
-            END AS ocupacion_pct,
-            CASE 
-                WHEN (e.ancladas + e.baseslibres) > 0 
-                THEN CAST(e.overflow AS FLOAT) / (e.ancladas + e.baseslibres) * 100
-                ELSE 0 
-            END AS overflow_pct_capacidad
-        FROM estaciones e
-        WHERE e.idestacion = ?
-          AND e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
+            fecha, hora, overflow, ancladas, baseslibres,
+            (ancladas + baseslibres) AS capacidad_total,
+            CASE WHEN (ancladas + baseslibres) > 0
+                 THEN CAST(ancladas AS FLOAT) / (ancladas + baseslibres) * 100
+                 ELSE 0 END AS ocupacion_pct,
+            CASE WHEN (ancladas + baseslibres) > 0
+                 THEN CAST(overflow AS FLOAT) / (ancladas + baseslibres) * 100
+                 ELSE 0 END AS overflow_pct_capacidad
+        FROM estaciones
+        WHERE idestacion = ?
+          AND fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
     """
     params = [idestacion]
+    if start:
+        sql += " AND fecha >= ?::DATE"; params.append(start)
+    if end:
+        sql += " AND fecha <= ?::DATE"; params.append(end)
 
-    if start is not None:
-        sql += " AND e.fecha >= ?::DATE"
-        params.append(start)
-
-    if end is not None:
-        sql += " AND e.fecha <= ?::DATE"
-        params.append(end)
-
-    sql += " ORDER BY e.fecha, e.hora"
-
-    cur = con.execute(sql, params)
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
+    sql += " ORDER BY fecha, hora"
+    return run_query(sql, params)
 
 
-"""
-Análisis semanal ENDPOINTS
-"""
-# =======================
-# ACTIVA (OPEN/CLOSED) ANALYSIS ENDPOINTS
-# =======================
-
-from typing import List, Dict, Any
+# =============================================================================
+#  ESTADO ACTIVA (abierta/cerrada)
+# =============================================================================
 
 def _normalize_status(open_obs: int, closed_obs: int) -> str:
     if open_obs > 0 and closed_obs == 0:
-        return "always_open"     # green
+        return "always_open"
     if closed_obs > 0 and open_obs == 0:
-        return "always_closed"   # red
-    return "mixed"              # yellow
+        return "always_closed"
+    return "mixed"
 
 
 @app.get("/api/activa/city_summary")
-def activa_city_summary(
-    start: str = Query(..., description="YYYY-MM-DD (incluida)"),
-    end: str = Query(..., description="YYYY-MM-DD (incluida)"),
-):
-    """
-    Devuelve resumen por estación en un rango:
-    - open_obs / closed_obs (nº observaciones)
-    - status: always_open | mixed | always_closed
-    - latitud/longitud/denominacion (para pintar en mapa)
-    """
+def activa_city_summary(start: str = Query(...), end: str = Query(...)):
     sql = """
         SELECT
             e.idestacion,
-            h.denominacion,
-            h.latitud,
-            h.longitud,
+            h.denominacion, h.latitud, h.longitud,
             SUM(CASE WHEN COALESCE(CAST(e.activa AS INTEGER), 0) = 1 THEN 1 ELSE 0 END) AS open_obs,
             SUM(CASE WHEN COALESCE(CAST(e.activa AS INTEGER), 0) = 0 THEN 1 ELSE 0 END) AS closed_obs,
             COUNT(*) AS total_obs
         FROM estaciones e
-        JOIN HistEstaciones h
-          ON e.idestacion = h.idestacion
-         AND e.fechaHora BETWEEN h.inicio AND h.fin
+        JOIN HistEstaciones h ON e.idestacion = h.idestacion
+                             AND e.fechaHora BETWEEN h.inicio AND h.fin
         WHERE e.fecha BETWEEN ?::DATE AND ?::DATE
         GROUP BY e.idestacion, h.denominacion, h.latitud, h.longitud
         ORDER BY e.idestacion
     """
-    cur = con.execute(sql, [start, end])
-    rows = cur.fetchall()
-    if cur.description is None or not rows:
-        return {
-            "start": start,
-            "end": end,
-            "totals": {"stations": 0, "always_open": 0, "mixed": 0, "always_closed": 0},
-            "stations": [],
-        }
-
-    cols = [d[0] for d in cur.description]
-    stations = [dict(zip(cols, r)) for r in rows]
+    rows = run_query(sql, [start, end])
 
     always_open = mixed = always_closed = 0
-    for s in stations:
-        oo = int(s.get("open_obs") or 0)
-        cc = int(s.get("closed_obs") or 0)
+    stations = []
+
+    for r in rows:
+        oo = int(r.get("open_obs", 0))
+        cc = int(r.get("closed_obs", 0))
         status = _normalize_status(oo, cc)
-        s["status"] = status
-        if status == "always_open":
-            always_open += 1
-        elif status == "always_closed":
-            always_closed += 1
-        else:
-            mixed += 1
+        r["status"] = status
+        stations.append(r)
+
+        if status == "always_open":    always_open += 1
+        elif status == "always_closed": always_closed += 1
+        else:                          mixed += 1
 
     return {
         "start": start,
@@ -724,66 +639,50 @@ def activa_city_summary(
 
 @app.get("/api/activa/station_status")
 def activa_station_status(
-    idestacion: str = Query(..., description="ID estación"),
-    start: str = Query(..., description="YYYY-MM-DD (incluida)"),
-    end: str = Query(..., description="YYYY-MM-DD (incluida)"),
+    idestacion: str = Query(...),
+    start: str = Query(...),
+    end: str = Query(...),
 ):
-    """
-    Devuelve detalle de una estación en un rango:
-    - status (always_open/mixed/always_closed)
-    - closed_moments: lista de instantes (fecha, hora, fechaHora) donde activa=0
-      (solo útil para mixed o always_closed)
-    """
     sql = """
         SELECT
-            e.idestacion,
-            e.fecha,
-            e.hora,
-            e.fechaHora,
+            e.idestacion, e.fecha, e.hora, e.fechaHora,
             COALESCE(CAST(e.activa AS INTEGER), 0) AS activa,
-            h.denominacion,
-            h.latitud,
-            h.longitud
+            h.denominacion, h.latitud, h.longitud
         FROM estaciones e
-        JOIN HistEstaciones h
-          ON e.idestacion = h.idestacion
-         AND e.fechaHora BETWEEN h.inicio AND h.fin
+        JOIN HistEstaciones h ON e.idestacion = h.idestacion
+                             AND e.fechaHora BETWEEN h.inicio AND h.fin
         WHERE e.idestacion = ?
           AND e.fecha BETWEEN ?::DATE AND ?::DATE
         ORDER BY e.fecha, e.hora
     """
-    cur = con.execute(sql, [idestacion, start, end])
-    rows = cur.fetchall()
-    if cur.description is None or not rows:
+    rows = run_query(sql, [idestacion, start, end])
+
+    if not rows:
         return {
             "idestacion": idestacion,
-            "start": start,
-            "end": end,
+            "start": start, "end": end,
             "status": "no_data",
-            "open_obs": 0,
-            "closed_obs": 0,
+            "open_obs": 0, "closed_obs": 0,
             "closed_moments": [],
         }
 
-    cols = [d[0] for d in cur.description]
-    recs = [dict(zip(cols, r)) for r in rows]
-
-    open_obs = 0
-    closed_obs = 0
+    open_obs = closed_obs = 0
     closed_moments = []
-    for r in recs:
+
+    for r in rows:
         if int(r["activa"]) == 1:
             open_obs += 1
         else:
             closed_obs += 1
-            closed_moments.append(
-                {"fecha": str(r["fecha"]), "hora": int(r["hora"]), "fechaHora": str(r["fechaHora"])}
-            )
+            closed_moments.append({
+                "fecha": str(r["fecha"]),
+                "hora": int(r["hora"]),
+                "fechaHora": str(r["fechaHora"])
+            })
 
     status = _normalize_status(open_obs, closed_obs)
 
-    # devolvemos también meta (denominacion/coords) del primer registro
-    first = recs[0]
+    first = rows[0]
     return {
         "idestacion": idestacion,
         "denominacion": first.get("denominacion"),
@@ -797,228 +696,5 @@ def activa_station_status(
         "closed_moments": closed_moments,
     }
 
-"""
-NEWWW
-"""
-from fastapi import HTTPException
 
-@app.get("/api/estacion_meta")
-def estacion_meta(idestacion: str = Query(...)):
-    sql = """
-      SELECT
-        e.idestacion,
-        h.denominacion,
-        h.latitud,
-        h.longitud
-      FROM estaciones e
-      JOIN HistEstaciones h
-        ON e.idestacion = h.idestacion
-       AND e.fechaHora BETWEEN h.inicio AND h.fin
-      WHERE e.idestacion = ?
-      ORDER BY e.fechaHora DESC
-      LIMIT 1
-    """
-    con = duckdb.connect(DB_PATH, read_only=True)
-    try:
-        cur = con.execute(sql, [idestacion])
-        row = cur.fetchone()
-        if not row:
-            # mejor 404 que None, así lo ves claro en consola/red
-            raise HTTPException(status_code=404, detail="Station not found in meta join")
-        cols = [d[0] for d in cur.description]
-        return dict(zip(cols, row))
-    finally:
-        con.close()
-
-
-# ============================================================
-#  NEW ANALYTICS ENDPOINTS  — append these to your main.py
-# ============================================================
-#  Add to existing imports (already in your file):
-#    from typing import Optional
-
-MIN_OVERFLOW_DATE_STR = "2024-07-01"   # keep in sync with existing value
-
-# DuckDB weekday mapping: DAYOFWEEK returns 1=Sun … 7=Sat (ISO: 1=Mon…7=Sun varies).
-# We normalise on the frontend with an explicit label array.
-
-# ─────────────────────────────────────────────────────────────
-#  HELPER: shared date-range WHERE clauses
-# ─────────────────────────────────────────────────────────────
-def _date_where(params: list, start: Optional[str], end: Optional[str]) -> str:
-    """Returns extra SQL fragments and appends to params list."""
-    extra = ""
-    if start is not None:
-        extra += " AND e.fecha >= ?::DATE"
-        params.append(start)
-    if end is not None:
-        extra += " AND e.fecha <= ?::DATE"
-        params.append(end)
-    return extra
-
-
-# ─────────────────────────────────────────────────────────────
-#  1.  /api/overflow/station_weekday_avg
-# ─────────────────────────────────────────────────────────────
-# DAYOFWEEK in DuckDB: 0 = Sunday … 6 = Saturday  (same as strftime %w)
-WEEKDAY_LABELS = {
-    0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat",
-}
-
-@app.get("/api/overflow/station_weekday_avg")
-def overflow_station_weekday_avg(
-    idestacion: str = Query(..., description="ID estación"),
-    start: Optional[str] = Query(None, description="Fecha inicio YYYY-MM-DD (incluida)"),
-    end: Optional[str] = Query(None, description="Fecha fin YYYY-MM-DD (incluida)"),
-):
-    """
-    Average overflow grouped by weekday for a single station + optional date range.
-    Returns 7 rows (only weekdays with data), ordered Mon–Sun.
-    """
-    if not idestacion:
-        return []
-
-    params: list = [idestacion]
-    sql = f"""
-        SELECT
-            DAYOFWEEK(e.fecha)          AS day_of_week,
-            AVG(e.overflow)             AS avg_overflow,
-            MAX(e.overflow)             AS max_overflow,
-            COUNT(*)                    AS total_observations
-        FROM estaciones e
-        WHERE e.idestacion = ?
-          AND e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
-    """
-    sql += _date_where(params, start, end)
-    sql += " GROUP BY day_of_week ORDER BY day_of_week"
-
-    try:
-        cur = con.execute(sql, params)
-        rows = cur.fetchall()
-    except Exception as exc:
-        import traceback
-        print(f"[station_weekday_avg] error: {exc}")
-        traceback.print_exc()
-        return []
-
-    if not rows or cur.description is None:
-        return []
-
-    cols = [d[0] for d in cur.description]
-    result = []
-    for r in rows:
-        rec = dict(zip(cols, r))
-        dow = int(rec["day_of_week"])
-        rec["label"] = WEEKDAY_LABELS.get(dow, str(dow))
-        # Re-order so Mon(1)…Sun(0) on the chart side
-        rec["sort_order"] = (dow - 1) % 7  # Mon=0 … Sun=6
-        result.append(rec)
-
-    result.sort(key=lambda x: x["sort_order"])
-    return result
-
-
-# ─────────────────────────────────────────────────────────────
-#  2.  /api/overflow/station_hourly_avg
-# ─────────────────────────────────────────────────────────────
-@app.get("/api/overflow/station_hourly_avg")
-def overflow_station_hourly_avg(
-    idestacion: str = Query(..., description="ID estación"),
-    start: Optional[str] = Query(None, description="Fecha inicio YYYY-MM-DD (incluida)"),
-    end: Optional[str] = Query(None, description="Fecha fin YYYY-MM-DD (incluida)"),
-):
-    """
-    Average overflow grouped by hour-of-day (0-23) for a single station.
-    """
-    if not idestacion:
-        return []
-
-    params: list = [idestacion]
-    sql = f"""
-        SELECT
-            e.hora                      AS hora,
-            AVG(e.overflow)             AS avg_overflow,
-            MAX(e.overflow)             AS max_overflow,
-            COUNT(*)                    AS total_observations
-        FROM estaciones e
-        WHERE e.idestacion = ?
-          AND e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
-    """
-    sql += _date_where(params, start, end)
-    sql += " GROUP BY e.hora ORDER BY e.hora"
-
-    try:
-        cur = con.execute(sql, params)
-        rows = cur.fetchall()
-    except Exception as exc:
-        import traceback
-        print(f"[station_hourly_avg] error: {exc}")
-        traceback.print_exc()
-        return []
-
-    if not rows or cur.description is None:
-        return []
-
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
-
-
-# ─────────────────────────────────────────────────────────────
-#  3.  /api/overflow/station_daily_summary
-# ─────────────────────────────────────────────────────────────
-@app.get("/api/overflow/station_daily_summary")
-def overflow_station_daily_summary(
-    idestacion: str = Query(..., description="ID estación"),
-    start: Optional[str] = Query(None, description="Fecha inicio YYYY-MM-DD (incluida)"),
-    end: Optional[str] = Query(None, description="Fecha fin YYYY-MM-DD (incluida)"),
-):
-    """
-    Per-day aggregation: avg_overflow, max_overflow, hours_with_overflow,
-    avg occupancy pct = ancladas / (ancladas + baseslibres).
-    """
-    if not idestacion:
-        return []
-
-    params: list = [idestacion]
-    sql = f"""
-        SELECT
-            e.fecha                                                              AS fecha,
-            AVG(e.overflow)                                                      AS avg_overflow,
-            MAX(e.overflow)                                                      AS max_overflow,
-            SUM(CASE WHEN e.overflow > 0 THEN 1 ELSE 0 END)                     AS hours_with_overflow,
-            COUNT(*)                                                             AS total_hours,
-            AVG(
-                CASE
-                    WHEN (e.ancladas + e.baseslibres) > 0
-                    THEN CAST(e.ancladas AS FLOAT) / (e.ancladas + e.baseslibres) * 100
-                    ELSE NULL
-                END
-            )                                                                    AS avg_occupancy_pct
-        FROM estaciones e
-        WHERE e.idestacion = ?
-          AND e.fecha >= DATE '{MIN_OVERFLOW_DATE_STR}'
-    """
-    sql += _date_where(params, start, end)
-    sql += " GROUP BY e.fecha ORDER BY e.fecha"
-
-    try:
-        cur = con.execute(sql, params)
-        rows = cur.fetchall()
-    except Exception as exc:
-        import traceback
-        print(f"[station_daily_summary] error: {exc}")
-        traceback.print_exc()
-        return []
-
-    if not rows or cur.description is None:
-        return []
-
-    cols = [d[0] for d in cur.description]
-    result = []
-    for r in rows:
-        rec = dict(zip(cols, r))
-        # Serialise DATE → string so FastAPI JSON-encodes it cleanly
-        if rec.get("fecha") is not None:
-            rec["fecha"] = str(rec["fecha"])
-        result.append(rec)
-    return result
+# Fin del archivo
