@@ -797,3 +797,14 @@ def activa_station_status(
         "closed_moments": closed_moments,
     }
 
+
+@app.get("/api/estacion_meta")
+def estacion_meta(idestacion: str = Query(...)):
+    sql = """
+      SELECT h.idestacion, h.denominacion, h.latitud, h.longitud
+      FROM HistEstaciones h
+      WHERE h.idestacion = ?
+      ORDER BY h.fin DESC
+      LIMIT 1
+    """
+    ...
