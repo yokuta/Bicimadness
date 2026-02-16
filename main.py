@@ -695,17 +695,22 @@ def activa_station_status(
         "closed_obs": closed_obs,
         "closed_moments": closed_moments,
     }
-
 @app.get("/api/estaciones_meta")
 def estaciones_meta():
     sql = """
       SELECT idestacion, denominacion, latitud, longitud
       FROM (
         SELECT
-          h.*,
-          ROW_NUMBER() OVER (PARTITION BY h.idestacion ORDER BY h.fin DESC) AS rn
+          h.idestacion,
+          h.denominacion,
+          h.latitud,
+          h.longitud,
+          ROW_NUMBER() OVER (
+            PARTITION BY h.idestacion
+            ORDER BY COALESCE(h.fin, TIMESTAMP '9999-12-31') DESC
+          ) AS rn
         FROM HistEstaciones h
-      )
+      ) t
       WHERE rn = 1
       ORDER BY CAST(idestacion AS INTEGER)
     """
