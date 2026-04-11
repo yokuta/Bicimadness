@@ -7,6 +7,9 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+import pandas as pd
+from io import BytesIO
+
 app = FastAPI()
 
 app.add_middleware(
@@ -717,4 +720,55 @@ def estaciones_meta():
     return run_query(sql)
 
 
+from io import BytesIO
+import pandas as pd
+
+@app.get("/api/estacion_rango_xlsx")
+def estacion_rango_xlsx(
+    idestacion: str = Query(...),
+    fecha_inicio: str = Query(...),
+    fecha_fin: str = Query(...),
+):
+    sql = """
+        SELECT
+            e.idestacion,
+            e.fecha,
+            e.hora,
+            e.fechaHora,
+            e.ancladas,
+            e.baseslibres,
+            e.overflow,
+            e.activa,
+            h.latitud,
+            h.longitud,
+            h.denominacion
+        FROM estaciones e
+        JOIN HistEstaciones h
+          ON e.idestacion = h.idestacion
+         AND e.fechaHora BETWEEN h.inicio AND h.fin
+        WHERE e.idestacion = ?
+          AND e.fecha BETWEEN ?::DATE AND ?::DATE
+        ORDER BY e.fecha, e.hora
+    """
+
+    rows = run_query(sql, [idestacion, fecha_inicio, fecha_fin])
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No hay datos para ese rango")
+
+    df = pd.DataFrame(rows)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="datos")
+
+    output.seek(0)
+
+    filename = f"estacion_{idestacion}_{fecha_inicio}_{fecha_fin}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 # Fin del archivo
